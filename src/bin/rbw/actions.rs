@@ -189,6 +189,40 @@ fn wait_for_exit(pid: rustix::process::Pid) {
 
 fn get_environment() -> rbw::protocol::Environment {
     let tty = std::env::var_os("RBW_TTY").or_else(|| {
+        // Check if stdin is actually a terminal before attempting to get its path
+        if !is_terminal::is_terminal(std::io::stdin()) {
+            return None;
+        }
+
+        // On macOS, ttyname_r can be extremely slow (taking seconds instead of milliseconds)
+        // as reported in https://github.com/doy/rbw/issues/11
+        // Use fcntl with F_GETPATH instead, which is much faster
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            // PATH_MAX is typically 1024 on macOS, use a reasonable constant
+            const PATH_BUF_SIZE: usize = 1024;
+
+            let fd = std::io::stdin().as_raw_fd();
+            let mut buf = [0u8; PATH_BUF_SIZE];
+            // F_GETPATH = 50 on macOS - gets the path of a file descriptor
+            let ret = unsafe { libc::fcntl(fd, 50, buf.as_mut_ptr()) };
+            if ret != -1 {
+                // Find the null terminator
+                if let Some(len) = buf.iter().position(|&b| b == 0) {
+                    if len > 0 {
+                        let path_bytes = &buf[..len];
+                        if let Ok(path_str) = std::str::from_utf8(path_bytes)
+                        {
+                            return Some(std::ffi::OsString::from(path_str));
+                        }
+                    }
+                }
+            }
+        }
+
+        // For non-macOS platforms, or if the macOS-specific approach failed,
+        // use the standard ttyname approach
         rustix::termios::ttyname(std::io::stdin(), vec![])
             .ok()
             .map(|p| std::ffi::OsString::from_vec(p.as_bytes().to_vec()))
